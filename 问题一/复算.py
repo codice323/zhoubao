@@ -13,7 +13,8 @@ from matplotlib import font_manager
 import numpy as np
 import pandas as pd
 from sklearn.cluster import KMeans
-from sklearn.metrics import silhouette_score
+from sklearn.metrics import (adjusted_rand_score, calinski_harabasz_score,
+                             davies_bouldin_score, silhouette_score)
 from sklearn.preprocessing import StandardScaler
 
 OUT = Path(__file__).resolve().parent
@@ -23,7 +24,10 @@ book = Path(sys.argv[1]) if len(sys.argv) > 1 else next(OUT.parent.glob("统一�
 def read(sheet, columns, index):
     frame = pd.read_excel(book, sheet_name=sheet, header=1)
     frame.columns = columns
-    return frame.set_index(index, verify_integrity=True)
+    frame = frame.set_index(index)
+    if not frame.index.is_unique:
+        raise ValueError(f"工作表 {sheet} 的索引 {index} 存在重复值")
+    return frame
 
 
 p = read("01-附件1产品库", ["编号", "型号", "机型", "厂商", "自由度", "负载", "速度", "续航",
@@ -53,15 +57,53 @@ perf_cols = ["自由度", "负载", "速度", "续航", "定位误差", "泛化"
 v = p[perf_cols].copy()
 v["定位误差"] *= -1
 p["性能分"] = ((v-v.min())/(v.max()-v.min())).mean(axis=1)*100
-features = pd.DataFrame({"单价":p["单价"], "性能分":p["性能分"], "防爆":p["防爆"].eq("是").astype(int)})
-x = StandardScaler().fit_transform(features)
-groups = KMeans(n_clusters=3, n_init=100, random_state=2026).fit_predict(x)
-profiles = features.groupby(groups).mean()
+# 聚类保留原始能力差异，并对性能、经济、环境防护、防爆、成熟度五组等权。
+# 每组内部变量先标准化，再除以该组变量数的平方根，避免变量较多的组天然占优。
+ip = p["防护"].str.extract(r"IP(\d)(\d)").astype(float)
+ip.columns = ["防尘", "防水"]
+cluster_raw = pd.concat([
+    v,
+    p[["单价", "年运维"]],
+    ip.set_axis(p.index),
+    p["防爆"].eq("是").astype(int).rename("防爆"),
+    p[["质保", "TRL"]],
+], axis=1)
+feature_groups = {
+    "性能": perf_cols,
+    "经济": ["单价", "年运维"],
+    "环境防护": ["防尘", "防水"],
+    "防爆": ["防爆"],
+    "成熟": ["质保", "TRL"],
+}
+scaled_parts = []
+for cols in feature_groups.values():
+    scaled_parts.append(StandardScaler().fit_transform(cluster_raw[cols]) / np.sqrt(len(cols)))
+x = np.column_stack(scaled_parts)
+base_model = KMeans(n_clusters=3, n_init=100, random_state=2026).fit(x)
+groups = base_model.labels_
+profiles = pd.DataFrame({"单价":p["单价"], "性能分":p["性能分"],
+                         "防爆":p["防爆"].eq("是").astype(int)}, index=p.index).groupby(groups).mean()
 special = profiles["防爆"].idxmax()
 flagship = profiles.drop(special)["性能分"].idxmax()
 order = ["旗舰型","性价比主力","特种专用"]
 p["产品群"] = [order[2] if g == special else order[0] if g == flagship else order[1] for g in groups]
 sil = silhouette_score(x, groups)
+
+# 用多个内部指标选择 K，并用重复子样本聚类检验三分类是否依赖少数产品。
+validation_rows = []
+for k in range(2, 7):
+    labels = KMeans(n_clusters=k, n_init=100, random_state=2026).fit_predict(x)
+    validation_rows.append([k, silhouette_score(x, labels),
+                            calinski_harabasz_score(x, labels), davies_bouldin_score(x, labels)])
+validation = pd.DataFrame(validation_rows, columns=["聚类数K", "轮廓系数", "CH指数", "DB指数"]).set_index("聚类数K")
+rng = np.random.default_rng(20261127)
+stability = []
+for _ in range(200):
+    sample = np.sort(rng.choice(len(p), size=round(.8*len(p)), replace=False))
+    sub_labels = KMeans(n_clusters=3, n_init=20,
+                        random_state=int(rng.integers(0, 2**31-1))).fit_predict(x[sample])
+    stability.append(adjusted_rand_score(groups[sample], sub_labels))
+stability = np.asarray(stability)
 profile = p.groupby("产品群").agg(款数=("型号","size"), 均价=("单价","mean"), 均性能分=("性能分","mean"),
         均负载=("负载","mean"), 均续航=("续航","mean"), 均泛化=("泛化","mean"), 均产能=("标称产能","mean"),
         防爆款数=("防爆",lambda a: a.eq("是").sum())).loc[order]
@@ -127,6 +169,13 @@ ax.set(xlabel="单价（万元/台）",ylabel="通用性能分（0–100）",yli
 ax.legend(frameon=False, loc="upper left",ncol=3,fontsize=9)
 ax.grid(axis="y",alpha=.18)
 price_fig = embed(fig, "48 款机器人单价与通用性能散点图")
+fig, ax = plt.subplots(figsize=(7.6,3.8), layout="constrained")
+ax.plot(validation.index, validation["轮廓系数"], marker="o", color="#176985")
+ax.axvline(3, color="#b65f34", linestyle="--", linewidth=1.2, label="题意指定三类")
+ax.set(xlabel="聚类数 K", ylabel="轮廓系数", xticks=validation.index)
+ax.grid(axis="y", alpha=.18)
+ax.legend(frameon=False)
+validation_fig = embed(fig, "不同聚类数的轮廓系数")
 fig, axes = plt.subplots(1,2,figsize=(10.2,4.4),layout="constrained",sharey=True)
 d = a.sort_values("任务量")
 for ax,col,label,color in zip(axes,["任务量","初筛强度"],["日均任务量（单/日）","每款初筛机型对应的日均任务量"],["#176985","#b65f34"]):
@@ -160,9 +209,11 @@ th,td{{padding:6px 10px;border-bottom:1px solid #dce4e5;text-align:right}}thead 
 <p>48 款产品对应 36 个站点，每日共有 {sites['任务量'].sum():,} 单任务。在附件 1、2 可直接核验的条件下，每款可选型号分摊任务量最高的三个场景依次为{ranking}。另有 {len(zero)} 个站点找不到同时满足要求的产品。</p>
 <h2>一、产品价格与性能</h2><p>单价从 {price.min():.1f} 到 {price.max():.1f} 万元，最高约为最低的 {price.max()/price.min():.2f} 倍。下表按产品等权统计，标准差为样本标准差，Q1 和 Q3 为第 25 和 75 百分位。</p>{table(desc)}
 <h3>三类产品的价格与能力分布</h3>{price_fig}
-<p>先把自由度、负载、速度、续航、定位精度、泛化评分和标称产能按全样本极差归一化，定位误差按越小越好处理。七项等权平均后乘 100，得到用于描述的通用性能分。再把单价、通用性能分、防爆认证（有为 1，无为 0）逐列标准化，做三类 K-means 聚类。固定种子 2026，初始化 100 次，取组内平方和最小解。三类取自题意，样本平均轮廓系数为 {sil:.3f}。</p>
+<p>通用性能分只用于二维展示：自由度、负载、速度、续航、定位精度、泛化评分和标称产能经极差正向化后等权平均。正式聚类不再把七项能力压缩成一个分数，而是使用上述七项性能、单价与年运维、防尘与防水等级、防爆认证、质保和 TRL 共 14 个变量。各变量先标准化；再令性能、经济、环境防护、防爆、成熟度五组的平方权重和相同，避免性能组因变量多而自动主导距离。将防爆单列是因为它是 R5 场景的准入硬条件，不能被一般 IP 指标稀释。K-means 固定种子 2026，每次初始化 100 次，取组内平方和最小解。</p>
+{validation_fig}{table(validation)}
+<p>题面给出“旗舰型、性价比主力、特种专用”三种业务类型。虽然内部评价指标在增加类别数时仍有改善，但更细分类会削弱与题面产品定位的对应关系，并增加后续选型解释的复杂度。因此综合题面框架、分类简洁性和业务可解释性，以 K＝3 作为主模型，其轮廓系数为 {sil:.3f}；K＝2—6 的结果作为对照。Calinski–Harabasz 指数和轮廓系数通常越大越好，Davies–Bouldin 指数通常越小越好。为检验三分类是否依赖少数样本，重复 200 次无放回抽取 80% 产品并重新聚类；与主模型在同一子样本上的调整兰德指数均值为 {stability.mean():.3f}，第 5—95 百分位为 {np.quantile(stability,.05):.3f}—{np.quantile(stability,.95):.3f}。该指标已消除类别标签置换影响，越接近 1 表示分群越稳定。</p>
 {table(profile)}
-<p>均价单位为万元/台，均负载为 kg，均续航为 h，均产能为单/日。最后一列表示每万元购置价对应的标称日产能，按组均产能除以组均价计算。按聚类中心命名，旗舰型的通用性能均分最高，性价比主力的购置价相对低，特种专用的 {int(profile.loc['特种专用','款数'])} 款均有防爆认证。等权通用性能分未计防爆能力，特种产品的价值需要结合危险场景解释。</p>
+<p>均价单位为万元/台，均负载为 kg，均续航为 h，均产能为单/日。最后一列表示每万元购置价对应的标称日产能，按组均产能除以组均价计算。类别名称依据聚类中心事后解释：性能中心较高者为旗舰型，价格相对低且效能比高者为性价比主力，防爆特征集中者为特种专用。命名不参与聚类计算。</p>
 <details><summary>展开 48 款产品的分群明细</summary>{table(p[['型号','机型','产品群','单价','年运维','性能分','防护','防爆','TRL','标称产能']])}</details>
 <h2>二、站点需求结构</h2><p>任务量单位为单/日，人力为可替代人数，人工成本为现有年成本（万元/年）。R1–R5 列为各级站点数，R5 风险最高。人工成本和可替代人力均为现状数据，实际节省额取决于后续部署。</p>
 {table(a[['站数','任务量','占比%','人力','人工成本','R1','R2','R3','R4','R5']].pipe(lambda t: pd.concat([t,t.sum().to_frame('合计').T])))}

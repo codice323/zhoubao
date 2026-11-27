@@ -259,6 +259,12 @@ im_plan,_=optimize(base,immediate=True)
 im,im_summary,_,_=ledger(base,im_plan)
 saved=im_summary["三年支出"]-summary.at[base.name,"三年支出"]
 lost=(im["覆盖单/日"].sum()-baseline["覆盖单/日"].sum())*365
+procurement_compare=pd.DataFrame([
+    ["滚动采购",summary.at[base.name,"逐年新增"],summary.at[base.name,"期末台数"],
+     baseline["覆盖单/日"].sum()*365,summary.at[base.name,"三年支出"],summary.at[base.name,"寿命成本现值"]],
+    ["2027一次购齐",im_summary["逐年新增"],im_summary["期末台数"],
+     im["覆盖单/日"].sum()*365,im_summary["三年支出"],im_summary["寿命成本现值"]],
+],columns=["策略","逐年新增","期末台数","三年累计服务量","三年财政支出","寿命成本现值"]).set_index("策略")
 view=["逐年新增","期末台数","期末覆盖率%","期末缺口","三年支出","较基准支出变化","寿命成本现值"]
 fixed_checks=[]
 for case in cases:
@@ -303,6 +309,15 @@ locked_gap=summary.at["2029任务+20%","期末缺口"]
 upper_labor_diff=im_summary["三年人工替代额现值上界"]-summary.at[base.name,"三年人工替代额现值上界"]
 proof=baseline[["新增台数","在役台数","投放站数","累计充电桩","覆盖单/日","覆盖率%","设备净支出","新增配套","运维","电费","年度支出"]]
 scene_view=scene_stats[scene_stats["情景"]==base.name].pivot(index="场景",columns="年度",values="覆盖率%")
+base_demand=inputs(base)[2]
+base_ceiling=ceilings(base_demand,None,2)
+reachability=[]
+for c in pd.unique(scene):
+    idx=scene==c
+    ds=base_demand[0,idx].sum(); upper=base_ceiling[0,idx].sum()
+    reachability.append([c,ds,upper,100*upper/ds,100*min(cfg["场景覆盖率下限"],upper/ds),
+                         max(0,cfg["场景覆盖率下限"]*ds-upper)])
+reachability=pd.DataFrame(reachability,columns=["场景","任务量","物理上界","物理上界%","有效考核线%","距85%不可达缺口"]).set_index("场景")
 html=f"""<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>问题四｜灵敏度分析与滚动采购</title><style>
 *{{box-sizing:border-box}}body{{max-width:1180px;margin:auto;padding:32px 28px 64px;color:#203a40;font:16px/1.75 system-ui,sans-serif}}h1{{font-size:32px;line-height:1.3}}
@@ -317,6 +332,8 @@ img{{max-width:100%;height:auto}}summary{{cursor:pointer;font-weight:650}}small{
 <li><b>2028 年</b>核对已到货机型、站点实绩和报价后，将 2027 年实际购置量锁定，重算剩余两年。基准预测下的新增为 {change_sites(base.name,2028)}。</li>
 <li><b>2029 年</b>只调整新增部分。若任务量与基准一致，新增为 {change_sites(base.name,2029)}。三年的逐站在役量、配桩和缺口均见 CSV。</li></ul>
 <details><summary>展开七类场景逐年覆盖率（%）</summary>{table(scene_view)}</details>
+<h3>可达覆盖率与有效考核线</h3>{table(reachability)}
+<p>附件把 85% 场景覆盖率列为软约束。对场景 k，先根据合格机型、班次和站点台数上限计算物理可达率 ρₖmax，再统一设置有效考核线 min(85%,ρₖmax)。因此政务接待不是人工删除约束，而是按照同一公式取其物理上界 80.42%；若项目验收坚持所有场景均不得低于 85%，则当前产品库无可行方案。</p>
 <h2>四类因素对预算与部署的影响</h2>
 <p>下表假定情景在 2027 年决策时已知，分别重排全部三年的采购。单价扰动对各年报价统一生效，技术系数在报价上连乘；任务量按每个站点同比例变化。无技术降价固定系数为 1，补贴维持 30% 仍受单台 {subcaps:.0f} 万元上限。其余参数一次只改变表中指定的因素。“价格补贴均冻结”同时冻结技术系数和补贴率。缺口单位为单/日。</p>
 {table(summary.loc[[base.name,*scenario_names],view])}
@@ -329,6 +346,8 @@ img{{max-width:100%;height:auto}}summary{{cursor:pointer;font-weight:650}}small{
 <p>需求下降时新增 {change_sites('2029任务−20%',2029)}。需求上升时新增 {change_sites('2029任务+20%',2029)}。若高增长从一开始即已明确，S035 能部署两台高产能机型；沿用基准前两年的 2 台 R014，最多服务 147.2 单/日，并已占满站点上限。相同的期末总台数下，晚获知增长会新增 {locked_gap-fiscal_gap:.1f} 单/日缺口。</p>
 <h2>与第三问和赛事政策的衔接</h2>
 <p>基准分期三年财政支出 {baseline['年度支出'].sum():,.2f} 万元，一次购齐为 {im_summary['三年支出']:,.2f} 万元；两者各批设备六年寿命成本折算到 2027 年初分别为 {summary.at[base.name,'寿命成本现值']:,.2f} 和 {im_summary['寿命成本现值']:,.2f} 万元。三年累计少完成的任务按每年 365 天估算；只按三年名义现金衡量，提前服务多一单的增量成本约为 {saved*10000/lost:.2f} 元。人工成本按站点覆盖比例和 1、1.08、1.17 的年度系数估算替代额上界；一次购齐较分期的三年替代额现值上界多 {upper_labor_diff:.2f} 万元，是否形成实际节省须以岗位排班和结算记录复核。</p>
+{table(procurement_compare)}
+<p>滚动方案与一次购齐方案使用相同的终期服务上界和成本口径。前者以较低财政支出换取较慢的前期服务爬坡；后者适合把早期覆盖价值置于资金节约之上。该表把“少花多少钱”和“少服务多少任务”同时列示，避免只按采购成本选择实施节奏。</p>
 <ol>
 <li><b>按站点设技术补缺项目。</b>工业巡检 S008 的定位误差上限为 1.00 mm，政务接待 S030 同时要求误差 ≤0.60 mm 和续航 ≥6 h。对新机型组织实测，达标后再更新可行清单。核验期间安排人工接续，政务的 115/143＝80.42% 单列，并报告距 85% 的 6.55 单/日。</li>
 <li><b>为增长敏感站点预留选型余地。</b>S035 的两台 R014 合计有效产能为 147.2 单/日。若签约前的持续需求预测超过此值，应优先比价更高产能机型；若预测超过 156.4 单/日，则须评估延长服务班次、调整站点上限或人工承接。</li>
@@ -338,7 +357,7 @@ img{{max-width:100%;height:auto}}summary{{cursor:pointer;font-weight:650}}small{
 <li><b>年度预算同时列设备、运维和配套。</b>基准 2029 年设备净采购 {baseline.loc[2029,'设备净支出']:.2f} 万元，同年运维已达 {baseline.loc[2029,'运维']:.2f} 万元。按批次追踪质保到期、运维涨幅、充电桩和站点改造，避免只以设备报价核算专项支出。</li>
 <li><b>用实际替岗收益选择实施速度。</b>对比每单提前服务的约 {saved*10000/lost:.2f} 元增量成本与可核实的人工、等待及服务价值；未实际撤减或转用的岗位不计财政节约。</li></ol>
 <h2>复算口径</h2>
-<p>以站点、型号、采购年为索引设置新增整数变量，在役量为历年新增累计，不提前报废或跨站调拨。用逐站任务量与班次折算产能中的较小值计算交付。各年先保可服务的高危任务，再要求各场景达 85% 或其物理上界。基准设市级 2027 年至少 90%、2028 年至少 95%、2029 年达到物理上界；前两项为分析设定。政务例外须经项目方认可；若所有场景的 85% 均不可豁免，则原问题无解。</p>
+<p>以站点、型号、采购年为索引设置新增整数变量，在役量为历年新增累计，不提前报废或跨站调拨。用逐站任务量与班次折算产能中的较小值计算交付。各年先把可服务的高危任务覆盖到物理上界；每类场景满足 qₖt/dₖt≥min(85%,ρₖtmax)。基准设全市 2027 年至少 90%、2028 年至少 95%、2029 年达到物理上界，形成逐年提高的服务爬坡路径；前两项是用于比较滚动采购的分析设定，并通过一次购齐方案作对照。</p>
 <p>在服务约束下，以三批设备的六年财政寿命成本现值最小为目标，用混合整数规划联合决定三年采购。第 t 年每台净价＝原始报价×价格扰动×技术系数−min(当年补贴率×当年报价, 25)；寿命按购置年起算，首年起按质保内 50% 和运维逐年上涨 3% 核算，残值取购置时补贴前报价的 10%。折现率为 5%，设备与配套于年初支付，运维、电费和寿命终值按年末计。购置价扰动不改变附件单独列明的运维报价。单班与双班有效产能分别为标称值的 0.46 和 0.92，24 小时按双班，其他服务窗以 12 小时分界。按每站每 3 台配 1 桩向上取整，设施只按增量建设。任一年度设备净购置不超额度的 85%；首年运维不超 900 万元；三年总财政支出不超 12,000 万元。所有已列情景的求解相对间隙均低于 0.0011%。</p>
 <p><small>数据来自赛题 Excel 的产品库、站点需求、适配矩阵、危险约束及政策参数。使用 OpenAI Codex（GPT-6 系列，2026-11-27，具体版本发布日期未提供）辅助数据复算。分析假设、逐站结果和程序一并提供。</small></p></main></html>"""
 (out/"问题四分析.html").write_text(html,encoding="utf-8")
