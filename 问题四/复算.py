@@ -157,25 +157,75 @@ def optimize(case,lock=None,immediate=False,locked_years=2):
         for k,v in items.items():
             rr.append(idx); cc.append(k); dd.append(v)
     mat=csr_matrix((dd,(rr,cc)),shape=(len(rows),len(obj)))
-    res=milp(obj,integrality=ints,bounds=Bounds(bounds_lo,bounds_hi),
-             constraints=LinearConstraint(mat,lower,upper),options={"mip_rel_gap":1e-5,"time_limit":90})
-    if not res.success:
-        raise RuntimeError(f"{case.name}：{res.message}")
-    plan=np.zeros((3,I,J),dtype=int)
-    for (t,i,j),k in x.items():
-        plan[t,i,j]=round(res.x[k])
+    constraints = [LinearConstraint(mat,lower,upper)]
+    def solve(objective):
+        # 连续固定整数位后，极窄的成本约束可能被 HiGHS 的预处理误判为不可行。
+        for presolve in (True,False):
+            result = milp(objective, integrality=ints, bounds=Bounds(bounds_lo,bounds_hi),
+                          constraints=constraints, options={"mip_rel_gap":0.0, "time_limit":90, "presolve":presolve})
+            if result.status != 2:
+                break
+        if not result.success:
+            raise RuntimeError(f"{case.name}：{result.message}")
+        return result
+
+    def purchases_from(solution):
+        plan = np.zeros((3,I,J),dtype=int)
+        for key,k in x.items():
+            plan[key] = round(solution[k])
+        return plan
+
+    cheapest = solve(obj)
+    # 统一用向上取整到 0.001 万元的成本上限，避免求解器末位浮点差异改变平局。
+    minimum_cost = np.dot(obj, np.rint(cheapest.x))
+    cost_limit = np.ceil(minimum_cost*1000-1e-7)/1000 + 1e-7
+    constraints.append(LinearConstraint(obj,-np.inf,cost_limit))
+    early = np.zeros(len(obj))
+    for (t,i),k in q.items():
+        if t < 2:
+            early[k] = -1
+    res = solve(early)
+    # 依据取整后的设备数量核算服务量，避免把连续松弛的数值误差锁成不可达目标。
+    early_stock = purchases_from(res.x).cumsum(axis=0)[:2]
+    best_early = np.minimum(demand[:2],(early_stock*unitcap).sum(axis=2)).sum()
+    constraints.append(LinearConstraint(early,-np.inf,-best_early+1e-6))
+
+    # 同一早期服务量下唯一确定采购向量。先比较早年，再按站点、型号编号逆序
+    # 最小化新增台数，使靠后编号在平局时让位。小块的混合进制编码等价于逐位比较。
+    ordered = [k for (t,i,j),k in sorted(x.items(),key=lambda item: (
+        item[0][0], -int(s.index[item[0][1]][1:]), -int(p.index[item[0][2]][1:])))
+               if bounds_lo[k] != bounds_hi[k]]
+    start = 0
+    while start < len(ordered):
+        # 已有可行解给出的连续零位已达各自下界，可直接固定。
+        while start < len(ordered) and round(res.x[ordered[start]]) == 0:
+            bounds_hi[ordered[start]] = 0
+            start += 1
+        block = ordered[start:start+8]
+        if block:
+            priority = np.zeros(len(obj))
+            place = 1
+            for k in reversed(block):
+                priority[k] = place
+                place *= int(bounds_hi[k])+1
+            res = solve(priority)
+            for k in block:
+                bounds_lo[k] = bounds_hi[k] = round(res.x[k])
+            start += len(block)
+    plan = purchases_from(res.x)
     _,summary,_,_=ledger(case,plan)
-    assert abs(summary["寿命成本现值"]-res.fun)<.01
+    assert cheapest.fun-1e-5 <= summary["寿命成本现值"] <= cost_limit+1e-5
     if lock is not None:
         assert np.array_equal(plan[:locked_years],lock[:locked_years])
     actual=np.minimum(demand,(plan.cumsum(axis=0)*unitcap).sum(axis=2))
+    assert abs(actual[:2].sum()-best_early)<1e-5
     for t in range(3):
         assert actual[t,risky].sum()>=ceiling[t,risky].sum()-1e-6
         for c in pd.unique(scene):
             idx=scene==c
             assert actual[t,idx].sum()>=min(cfg["场景覆盖率下限"]*demand[t,idx].sum(),ceiling[t,idx].sum())-1e-6
     assert (actual.sum(axis=1)>=[.90*demand[0].sum()-1e-6,.95*demand[1].sum()-1e-6,ceiling[2].sum()-1e-6]).all()
-    return plan,res.mip_gap
+    return plan,cheapest.mip_gap
 
 
 def ledger(case,plan):
@@ -358,6 +408,6 @@ img{{max-width:100%;height:auto}}summary{{cursor:pointer;font-weight:650}}small{
 <li><b>用实际替岗收益选择实施速度。</b>对比每单提前服务的约 {saved*10000/lost:.2f} 元增量成本与可核实的人工、等待及服务价值；未实际撤减或转用的岗位不计财政节约。</li></ol>
 <h2>复算口径</h2>
 <p>以站点、型号、采购年为索引设置新增整数变量，在役量为历年新增累计，不提前报废或跨站调拨。用逐站任务量与班次折算产能中的较小值计算交付。各年先把可服务的高危任务覆盖到物理上界；每类场景满足 qₖt/dₖt≥min(85%,ρₖtmax)。基准设全市 2027 年至少 90%、2028 年至少 95%、2029 年达到物理上界，形成逐年提高的服务爬坡路径；前两项是用于比较滚动采购的分析设定，并通过一次购齐方案作对照。</p>
-<p>在服务约束下，以三批设备的六年财政寿命成本现值最小为目标，用混合整数规划联合决定三年采购。第 t 年每台净价＝原始报价×价格扰动×技术系数−min(当年补贴率×当年报价, 25)；寿命按购置年起算，首年起按质保内 50% 和运维逐年上涨 3% 核算，残值取购置时补贴前报价的 10%。折现率为 5%，设备与配套于年初支付，运维、电费和寿命终值按年末计。购置价扰动不改变附件单独列明的运维报价。单班与双班有效产能分别为标称值的 0.46 和 0.92，24 小时按双班，其他服务窗以 12 小时分界。按每站每 3 台配 1 桩向上取整，设施只按增量建设。任一年度设备净购置不超额度的 85%；首年运维不超 900 万元；三年总财政支出不超 12,000 万元。所有已列情景的求解相对间隙均低于 0.0011%。</p>
+<p>在服务约束下，以三批设备的六年财政寿命成本现值最小为目标，用混合整数规划联合决定三年采购。先求最低寿命成本，向上取整到 0.001 万元（10 元）作为成本上限；在该上限内最大化 2027 和 2028 年日均服务量之和。若仍有平局，按年份升序、站点及型号编号降序，依次最小化新增台数，唯一确定逐站采购清单。第 t 年每台净价＝原始报价×价格扰动×技术系数−min(当年补贴率×当年报价, 25)；寿命按购置年起算，首年起按质保内 50% 和运维逐年上涨 3% 核算，残值取购置时补贴前报价的 10%。折现率为 5%，设备与配套于年初支付，运维、电费和寿命终值按年末计。购置价扰动不改变附件单独列明的运维报价。单班与双班有效产能分别为标称值的 0.46 和 0.92，24 小时按双班，其他服务窗以 12 小时分界。按每站每 3 台配 1 桩向上取整，设施只按增量建设。任一年度设备净购置不超额度的 85%；首年运维不超 900 万元；三年总财政支出不超 12,000 万元。所有已列情景的求解相对间隙均低于 0.0011%。</p>
 <p><small>数据来自赛题 Excel 的产品库、站点需求、适配矩阵、危险约束及政策参数。使用 OpenAI Codex（GPT-6 系列，2026-11-27，具体版本发布日期未提供）辅助数据复算。分析假设、逐站结果和程序一并提供。</small></p></main></html>"""
 (out/"问题四分析.html").write_text(html,encoding="utf-8")

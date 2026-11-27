@@ -48,14 +48,17 @@ discount = (1+rate)**(-np.arange(1,life+1,dtype=float))
 base_lcc = net + discount @ op - gross*cfg["残值率"]*discount[-1]
 
 
-def shifts(window):
+def service_hours(window):
     if window=="24小时":
-        return 2
+        return 24
     start,end = window.split("-")
     def minutes(t):
         h,m = map(int,t.split(":"))
         return 60*h+m
-    return 1 if (minutes(end)-minutes(start))%1440 <= 720 else 2
+    return ((minutes(end)-minutes(start))%1440)/60
+
+
+hours = s["时段"].map(service_hours)
 
 
 def valid_products(station, row):
@@ -73,39 +76,43 @@ def valid_products(station, row):
     return p.index[ok].tolist()
 
 
-# 每个站点的型号组合为一个整数决策的等价编码，允许不同型号混配。
-records = []
-for i,(station,row) in enumerate(s.iterrows()):
-    ids = valid_products(station,row)
-    shift = shifts(row["时段"])
-    power = cfg["单台日均能耗"]*shift/2 * 365*cfg["电价"]/10000
-    coeff = cfg["单台日均产能折算系数"]*shift/2
-    for n in range(int(row["台数上限"])+1):
-        for combo in combinations_with_replacement(ids,n):
-            pos = p.index.get_indexer(combo)
-            chargers = int(np.ceil(n/cfg["充电桩配比"]))
-            site_cost = cfg["单站配套改造费"]*(n>0)+cfg["充电桩单价"]*chargers
-            q = min(row["需求"],p["产能"].to_numpy()[pos].sum()*coeff)
-            procurement = net.to_numpy()[pos].sum()
-            annual_op = op[:3,pos].sum(axis=1)
-            cash = procurement+site_cost+annual_op[0]+n*power
-            lcc = base_lcc.to_numpy()[pos].sum()+site_cost+n*power*discount.sum()
-            records.append((i,combo,n,shift,chargers,q,procurement,annual_op[0],cash,
-                            annual_op[1]+n*power,annual_op[2]+n*power,lcc,site_cost,n*power,gross.to_numpy()[pos].sum()))
-options = pd.DataFrame(records,columns=["站序","组合","台数","班数","桩数","覆盖","设备净支出","首年运维","首年支出",
-                                         "次年支出","第三年支出","寿命成本","配套","年电费","设备原价"])
-options["三年支出"] = options[["首年支出","次年支出","第三年支出"]].sum(axis=1)
-# 同站被另一组合在覆盖及全部预算、目标上支配时，可安全剪枝；完全相同保留首个。
-keep = []
-costcols = ["寿命成本","设备净支出","首年运维","首年支出","次年支出","第三年支出","三年支出"]
-for _,g in options.groupby("站序",sort=True):
-    vals = np.round(np.column_stack([-g["覆盖"],g[costcols]]),9)
-    for k,v in enumerate(vals):
-        better = (vals<=v).all(axis=1)
-        equal = (vals==v).all(axis=1)
-        if not (better & ~equal).any() and not equal[:k].any():
-            keep.append(g.index[k])
-options = options.loc[keep].reset_index(drop=True)
+def build_options(pool, shift_threshold):
+    # 每个站点的型号组合为一个整数决策的等价编码，允许不同型号混配。
+    records = []
+    for i,(station,row) in enumerate(s.iterrows()):
+        ids = [pid for pid in valid_products(station,row) if pid in pool]
+        shift = 2 if row["时段"]=="24小时" or hours.at[station]>shift_threshold else 1
+        power = cfg["单台日均能耗"]*shift/2 * 365*cfg["电价"]/10000
+        coeff = cfg["单台日均产能折算系数"]*shift/2
+        for n in range(int(row["台数上限"])+1):
+            for combo in combinations_with_replacement(ids,n):
+                pos = p.index.get_indexer(combo)
+                chargers = int(np.ceil(n/cfg["充电桩配比"]))
+                site_cost = cfg["单站配套改造费"]*(n>0)+cfg["充电桩单价"]*chargers
+                q = min(row["需求"],p["产能"].to_numpy()[pos].sum()*coeff)
+                procurement = net.to_numpy()[pos].sum()
+                annual_op = op[:3,pos].sum(axis=1)
+                cash = procurement+site_cost+annual_op[0]+n*power
+                lcc = base_lcc.to_numpy()[pos].sum()+site_cost+n*power*discount.sum()
+                records.append((i,combo,n,shift,chargers,q,procurement,annual_op[0],cash,
+                                annual_op[1]+n*power,annual_op[2]+n*power,lcc,site_cost,n*power,gross.to_numpy()[pos].sum()))
+    options = pd.DataFrame(records,columns=["站序","组合","台数","班数","桩数","覆盖","设备净支出","首年运维","首年支出",
+                                             "次年支出","第三年支出","寿命成本","配套","年电费","设备原价"])
+    options["三年支出"] = options[["首年支出","次年支出","第三年支出"]].sum(axis=1)
+    # 同站被另一组合在覆盖及全部预算、目标上支配时，可安全剪枝；完全相同保留首个。
+    keep = []
+    costcols = ["寿命成本","设备净支出","首年运维","首年支出","次年支出","第三年支出","三年支出"]
+    for _,g in options.groupby("站序",sort=True):
+        vals = np.round(np.column_stack([-g["覆盖"],g[costcols]]),9)
+        for k,v in enumerate(vals):
+            better = (vals<=v).all(axis=1)
+            equal = (vals==v).all(axis=1)
+            if not (better & ~equal).any() and not equal[:k].any():
+                keep.append(g.index[k])
+    return options.loc[keep].reset_index(drop=True)
+
+
+options = build_options(set(p.index), 12)
 groups = [g.index.to_numpy() for _,g in options.groupby("站序",sort=True)]
 stations = np.arange(len(s))
 capacity = options.groupby("站序")["覆盖"].max().to_numpy()
@@ -119,12 +126,16 @@ goals = {"成本优先":.90*demand.sum(),"均衡覆盖":.95*demand.sum(),"最高
 sid = options["站序"].to_numpy()
 cov = options["覆盖"].to_numpy()
 limits = np.array([net_limit,op_limit,year_budget,cfg["2028 年度额度"],cfg["2029 年度额度"],budget3])
-values = np.column_stack([cov[:,None]*by_scene[:,sid].T,cov*risk_mask[sid],cov,
-          options[["设备净支出","首年运维","首年支出","次年支出","第三年支出","三年支出"]]])
+def contributions(choices):
+    site = choices["站序"].to_numpy()
+    covered = choices["覆盖"].to_numpy()
+    return np.column_stack([covered[:,None]*by_scene[:,site].T,covered*risk_mask[site],covered,
+            choices[["设备净支出","首年运维","首年支出","次年支出","第三年支出","三年支出"]]])
+
+
+values = contributions(options)
 lcc = options["寿命成本"].to_numpy()
 scale = np.r_[scene_demand,max(1,risk_ceiling),demand.sum(),limits]
-site_choice = np.eye(len(s))[sid].T
-A = csr_matrix(np.vstack([site_choice,values.T]))
 
 
 def limits_for(goal):
@@ -162,20 +173,19 @@ def genetic(goal,seed):
     return answer
 
 
-def exact(goal,ga):
+def exact(choices, goal, cost_bound=np.inf):
+    # 对照组沿用基准的七类场景、高危和全市覆盖约束，保持比较口径一致。
     lo,hi = limits_for(goal)
-    choices = len(options)
-    # 遗传算法的可行解成本作为上界，随后对同一个离散模型验证最优性。
-    from scipy.sparse import vstack
-    augmented = vstack([A,csr_matrix(lcc[None,:])])
-    cons = LinearConstraint(augmented,np.r_[np.ones(len(s)),lo,-np.inf],
-                             np.r_[np.ones(len(s)),hi,lcc[ga].sum()+1e-6])
-    res = milp(lcc,integrality=np.ones(choices),bounds=Bounds(0,1),constraints=cons,
+    site_choice = np.eye(len(s))[choices["站序"].to_numpy()].T
+    costs = choices["寿命成本"].to_numpy()
+    matrix = csr_matrix(np.vstack([site_choice,contributions(choices).T,costs]))
+    cons = LinearConstraint(matrix,np.r_[np.ones(len(s)),lo,-np.inf],
+                             np.r_[np.ones(len(s)),hi,cost_bound])
+    res = milp(costs,integrality=np.ones(len(choices)),bounds=Bounds(0,1),constraints=cons,
                options={"mip_rel_gap":0.0})
     if not res.success:
-        raise RuntimeError(res.message)
-    chosen = np.flatnonzero(res.x>.5)
-    return chosen, res.mip_gap
+        raise RuntimeError(f"同一覆盖目标下求解失败：{res.message}")
+    return np.flatnonzero(res.x>.5),res.mip_gap
 
 
 def verify(plan,goal):
@@ -192,11 +202,32 @@ def combo_text(combo):
     return "、".join(f"{k}×{n}" for k,n in sorted(Counter(combo).items())) or "—"
 
 
+def station_details(g,name):
+    t = s[["场景","名称","风险","时段","台数上限","需求"]].join(g[["班数","台数","桩数","覆盖","设备净支出","配套","首年运维","年电费","首年支出","寿命成本"]])
+    t.insert(0,"方案",name)
+    t["产品及数量"] = g["组合"].map(combo_text)
+    t["缺口"] = demand-g["覆盖"]
+    t["可替代人力当量"] = (g["覆盖"]/demand)*s["人力"]
+    t["服务时长(h)"] = hours
+    t["半服务时长(h)"] = hours/2
+    runtimes,affected,counts = [],[],[]
+    for station,combo in g["组合"].items():
+        types = Counter(combo)
+        runtimes.append("、".join(f"{pid}：{p.at[pid,'续航']:g}h" for pid in sorted(types)) or "—")
+        needs_swap = [pid for pid in combo if p.at[pid,"续航"] < hours.at[station]/2]
+        affected.append(combo_text(needs_swap))
+        counts.append(len(needs_swap))
+    t["型号续航"] = runtimes
+    t["需增配换电型号及数量"] = affected
+    t["需增配换电台数"] = counts
+    return t.reset_index()
+
+
 summary,details,scene_rows,hist = [],[],[],[]
 for k,(name,goal) in enumerate(goals.items()):
     ga = genetic(goal,20261127+k)
     verify(ga,goal)
-    plan, gap = exact(goal,ga)
+    plan, gap = exact(options,goal,lcc[ga].sum()+1e-6)
     verify(plan,goal)
     g = options.iloc[plan].set_axis(s.index)
     served = g["覆盖"].to_numpy()
@@ -213,12 +244,7 @@ for k,(name,goal) in enumerate(goals.items()):
     counts = Counter(pid for combo in g["组合"] for pid in combo)
     for pid,n in sorted(counts.items()):
         hist.append([name,pid,p.at[pid,"型号"],p.at[pid,"机型"],n,net[pid]*n])
-    t = s[["场景","名称","风险","时段","台数上限","需求"]].join(g[["班数","台数","桩数","覆盖","设备净支出","配套","首年运维","年电费","首年支出","寿命成本"]])
-    t.insert(0,"方案",name)
-    t["产品及数量"] = g["组合"].map(combo_text)
-    t["缺口"] = demand-served
-    t["可替代人力当量"] = fraction*s["人力"]
-    details.append(t.reset_index())
+    details.append(station_details(g,name))
     for c,total,possible,taken in zip(scenes,scene_demand,by_scene@capacity,by_scene@served):
         scene_rows.append([name,c,total,possible,taken,100*taken/total,max(0,target*total-taken)])
 
@@ -239,7 +265,44 @@ def table(frame):
 rec = summary.loc["最高覆盖"]
 middle = summary.loc["均衡覆盖"]
 station_table = details[details["方案"]=="最高覆盖"].set_index("站点编号")
-zero = station_table.loc[station_table["覆盖"]==0,["场景","名称","需求","产品及数量"]]
+swap_list = station_table.loc[station_table["需增配换电台数"]>0,
+    ["场景","名称","风险","时段","服务时长(h)","半服务时长(h)","型号续航","需增配换电型号及数量","需增配换电台数"]]
+swap_list.to_csv(OUT/"推荐方案换电清单.csv",encoding="utf-8-sig")
+swap_count = int(swap_list["需增配换电台数"].sum())
+
+ranking = pd.read_csv(OUT.parent/"问题二"/"48款评分与站点.csv").set_index("产品编号")
+if not ranking.index.is_unique or set(ranking.index)!=set(p.index) or sorted(ranking["名次"])!=list(range(1,len(p)+1)):
+    raise ValueError("第二问排名与产品库不匹配，请用同一附件重跑问题二。")
+shortlist = set(ranking.nsmallest(15,"名次").index)
+control_cases = [("仅限前15名",shortlist,12),("10小时分界",set(p.index),10)]
+baseline_label = "全库・12小时分界"
+control_rows = [station_table.reset_index().assign(方案=baseline_label)]
+for label,pool,threshold in control_cases:
+    candidates = build_options(pool,threshold)
+    chosen,_ = exact(candidates,goals["最高覆盖"])
+    selected = candidates.iloc[chosen]
+    assert np.array_equal(selected["站序"],stations)
+    assert all(set(combo)<=pool for combo in selected["组合"])
+    lo,hi = limits_for(goals["最高覆盖"])
+    totals = contributions(selected).sum(axis=0)
+    assert (totals>=lo-1e-6).all() and (totals<=hi+1e-6).all()
+    control_rows.append(station_details(selected.set_axis(s.index),label))
+control_detail = pd.concat(control_rows,ignore_index=True)
+control_detail.to_csv(OUT/"最高覆盖对照逐站采购.csv",index=False,encoding="utf-8-sig",float_format="%.6f")
+comparison = control_detail.groupby("方案",sort=False)[["台数","覆盖","需增配换电台数","首年支出","寿命成本"]].sum()
+comparison.insert(2,"覆盖率%",100*comparison["覆盖"]/demand.sum())
+comparison["首年支出差额"] = comparison["首年支出"]-comparison.at[baseline_label,"首年支出"]
+comparison["寿命成本差额"] = comparison["寿命成本"]-comparison.at[baseline_label,"寿命成本"]
+print(comparison.to_string())
+outside = mix[(mix["方案"]=="最高覆盖") & ~mix["产品编号"].isin(shortlist)]
+outside_text = "、".join(f"{r.产品编号} × {r.台数}" for r in outside.itertuples()) or "无"
+short_control = comparison.loc["仅限前15名"]
+shift_control = comparison.loc["10小时分界"]
+hour_changed = control_detail[(control_detail["方案"]=="10小时分界") & control_detail["服务时长(h)"].gt(10)
+                              & control_detail["服务时长(h)"].le(12) & control_detail["台数"].gt(0)]
+shift_sites = control_detail[control_detail["方案"]=="10小时分界"].set_index("站点编号")
+fewer = shift_sites["台数"] < station_table["台数"]
+reduced_text = "、".join(f"{i}（{station_table.at[i,'台数']} 台降至 {shift_sites.at[i,'台数']} 台）" for i in shift_sites.index[fewer])
 scene_table = coverage.pivot(index="场景",columns="方案",values="覆盖率%").reindex(index=scenes,columns=summary.index)
 scene_table.insert(0,"总任务量",scene_demand)
 scene_table.insert(1,"物理上界%",100*attainable_rate)
@@ -259,7 +322,7 @@ h1{{font-size:32px;line-height:1.3}}h2{{margin:35px 0 12px;border-bottom:2px sol
 td,th{{padding:5px 9px;border-bottom:1px solid #d6e2e1;text-align:right}}thead{{background:#e8f1f0}}tbody th{{text-align:left}}
 summary{{cursor:pointer;font-weight:650}}small{{color:#52656c}}code{{font-size:15px}}.note{{border-left:4px solid #a05f28;padding:4px 16px;background:#fcf6ed}}
 </style><main><h1>问题三｜机器人采购与站点分配</h1>
-<p><b>推荐最高覆盖方案。</b>在优先保障可服务的高危任务、让每个有合格机型的站点都完成日常任务的偏好下，购置 {int(rec['台数'])} 台、部署 {int(rec['投放站数'])} 站，日均服务 {rec['任务覆盖']:,.0f} 单。首年财政支出 {rec['首年支出']:,.2f} 万元，低于 2027 年 4,000 万元额度；六年成本现值为 {rec['寿命成本']:,.2f} 万元。</p>
+<p><b>推荐最高覆盖方案。</b>按 12 小时班次分界，购置 {int(rec['台数'])} 台、部署 {int(rec['投放站数'])} 站。落实下表换电配套后，预计日均完成 {rec['任务覆盖']:,.0f} 单（{rec['覆盖率%']:.2f}%）。按已有报价，首年财政支出 {rec['首年支出']:,.2f} 万元，六年成本现值为 {rec['寿命成本']:,.2f} 万元；增配换电的未报价费用须另计。</p>
 <p class="note">附件将 85% 标为软约束。本文先计算每类场景的物理可达率 ρₖmax，再把有效考核线统一定义为 min(85%, ρₖmax)。政务接待因 S030 无合格机型，ρₖmax＝115/143＝80.42%，故有效考核线为 80.42%；其余场景仍执行 85%。如果项目方把七类场景的 85% 全部改为不可放宽的硬验收线，则原始候选库无可行解。</p>
 <h2>三套采购方案</h2>{table(summary[headline])}
 <p>三个方案分别要求全市覆盖至少 90%、95%、或达到物理可行上界。各场景均执行统一的可达覆盖率约束 qₖ/dₖ≥min(85%,ρₖmax)，并把 R4/R5 覆盖量固定在其可达上界；在相应服务水平下最小化六年成本。物理上界完成率表示实际覆盖量占全部可达任务量的比例；场景可达完成率标准差以各场景“实际覆盖/物理上界”为样本计算，越小表示场景间越均衡。人力按本站覆盖比例折算为全职当量。高危站总计 {demand[risk_mask].sum()} 单/日，可服务其中 {risk_ceiling:.0f} 单/日。</p>
@@ -267,6 +330,13 @@ summary{{cursor:pointer;font-weight:650}}small{{color:#52656c}}code{{font-size:1
 <h2>买哪些型号，放在哪些站点</h2>{table(mix_table.astype(int))}
 <p>各场景覆盖率按站点实际完成单量汇总。物理上界由本站台数上限、合格机型和班次共同决定；有效考核线取 85% 与物理上界的较小者。最后一列单位为单/日，表示在当前候选库下距 85% 的结构性不可达缺口。</p>{table(scene_table)}
 <details open><summary>推荐方案 · 全部 36 个站点</summary>{table(station_table[['场景','名称','风险','班数','需求','产品及数量','台数','桩数','覆盖','缺口','首年支出']])}</details>
+<h3>推荐方案换电清单</h3>{table(swap_list)}
+<p>按附件字段字典，双班站需配备换电或快充；当单台续航严格短于本站服务时长的一半时，标记为需增配换电。跨午夜按实际时长计算，同站混配逐台判断。推荐方案共有 {len(swap_list)} 站、{swap_count} 台触发该条件。表中的台数是需要配套的机器人数量，电池包数量及轮换周期须由厂商按负载和充电时间核定。</p>
+<p>充电桩及站点改造已计入报价。若在已计费用之外，每台另需一次性净增配费 b 万元，推荐方案首年支出为 {rec['首年支出']:,.2f}＋{swap_count}b 万元。不同型号报价不同时按“需增配台数 × 相应型号净增配单价”逐项汇总。其他费用固定时，可用于增配的首年总额余量为 {year_budget-rec['首年支出']:.2f} 万元。供应商报价、后续换电运维费及交付能力明确后须重新核对预算和覆盖。</p>
+<h2>两组同覆盖目标对照</h2>{table(comparison)}
+<p>三行均使用基准最高覆盖方案的全市、高危和七类场景目标、台数上限和预算，以六年成本现值最小求解。覆盖单位为单/日；首年支出、寿命成本和相对基准的差额均为万元。成本按附件报价计算，换电净增配费另列。全库基准与两套对照的逐站型号及换电需求均收录在对照采购清单。</p>
+<p><b>候选范围。</b>保持 12 小时分界，仅允许第二问综合排名前 15 名进入逐站筛选。基准实际采购的榜外合格型号为 {outside_text}。收窄范围后首年多支出 {short_control['首年支出差额']:.2f} 万元，六年成本现值多 {short_control['寿命成本差额']:.2f} 万元。</p>
+<p><b>班次分界。</b>保持全库可选，将单班服务窗口上限从 12 小时改为 10 小时。已投放站中，{'、'.join(hour_changed['站点编号']) or '无'} 由单班改为双班。台数减少的站点为 {reduced_text or '无'}。对照方案需要 {int(shift_control['台数'])} 台；在相同任务目标下，首年已计费用节省 {-shift_control['首年支出差额']:.2f} 万元。电费随班次重算，附件未给出新增班组人工报价；若增班的首年额外人员成本超过该节省额，且其他增量成本相同，则 10 小时方案的首年支出会更高。</p>
 <p>上表保留了无机型可投的站点。S008 要求定位误差 ≤1.00 mm，可接受类别的最佳值为 1.13 mm；S030 仅接受双足人形，要求续航 ≥6 h、误差 ≤0.60 mm，而该类最长续航 4.8 h、最佳误差 1.13 mm。因此两站的 50 单/日构成全市供给缺口。另两套方案的逐站数据也已收入 CSV。</p>
 <h2>资金与寿命成本（万元）</h2>{table(cash)}
 <p>第三问按 2027 年初一次性购置和投运估算。设备按当年补贴抵扣计净采购支出，单台补贴为 min(单价×30%, 25 万元)；配套含每个启用站 8 万元改造费及每桩 6 万元。各站每 3 台配 1 桩，不足 3 台向上取整，跨站不合桩。首年支出包括设备净采购、站点配套、质保减免后的运维和运行电费。第二、三年按继续运行且不追加采购核算。</p>
