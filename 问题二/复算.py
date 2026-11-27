@@ -62,7 +62,17 @@ axes["适配"] = eligible.groupby(s["场景"]).mean().mean(axis=0)*100
 axes["安全"] = hardware.mean()*100
 axes["成熟度"] = scaling(p["TRL"])
 assert axes.notna().all().all() and axes.ge(0).all().all() and axes.le(100+1e-10).all().all()
-weights = np.array([.30,.20,.25,.15,.10])
+# 政策权重表达示范项目的价值取向；CRITIC 权重由离散度和指标冲突性给出。
+# 两者等比例组合，既保留政策目标，也避免完全依赖人为给权。
+policy_weights = np.array([.30,.20,.25,.15,.10])
+std = axes.std(ddof=0).to_numpy()
+corr = axes.corr().to_numpy()
+critic_information = std * (1-corr).sum(axis=1)
+if not np.isfinite(critic_information).all() or critic_information.sum() <= 0:
+    raise ValueError("CRITIC 权重无法计算，请检查维度方差和相关矩阵")
+critic_weights = critic_information/critic_information.sum()
+weights = .5*policy_weights + .5*critic_weights
+weights = weights/weights.sum()
 unit = axes.to_numpy()
 base_scores = unit @ weights
 names = p.index.to_numpy()
@@ -145,13 +155,32 @@ changed_corners = pd.DataFrame(changes,columns=[*axes.columns,"进入","退出"]
 winner_ids, winner_counts = np.unique(names[np.argmin(ranks,axis=1)],return_counts=True)
 winners = "、".join(f"{k}（{c/len(ranks):.2%}）" for k,c in sorted(zip(winner_ids,winner_counts),key=lambda kv:-kv[1]))
 first = short.index[0]
-weights_table = pd.DataFrame([
-    ["性能","30%","自由度、负载、速度、续航、重复定位误差、智能泛化各占 1/6。误差越小越好，其余越大越好。"],
-    ["经济","20%","单价、年运维费各占 40%（越低越好），质保期占 20%（越长越好）。采用附件 1 的基准报价。"],
-    ["适配","25%","按七类场景等权，取每类场景内通过本站全部可核验门槛的站点比例，再取七类平均，乘 100。"],
-    ["安全","15%","按附件 3b 核验 IP 两位及明确强制的防爆要求，满足的风险等级数除以 5，再乘 100。"],
-    ["成熟度","10%","以产品 TRL 在 48 款中的位置计分，TRL 6、7、8、9 分别为 0、33.33、66.67、100。"]
-],columns=["维度","基准权重","计算方式"]).set_index("维度")
+methods = [
+    "自由度、负载、速度、续航、重复定位误差、智能泛化各占 1/6。误差越小越好，其余越大越好。",
+    "单价、年运维费各占 40%（越低越好），质保期占 20%（越长越好）。采用附件 1 的基准报价。",
+    "按七类场景等权，取每类场景内通过本站全部可核验门槛的站点比例，再取七类平均，乘 100。",
+    "按附件 3b 核验 IP 两位及明确强制的防爆要求，满足的风险等级数除以 5，再乘 100。",
+    "以产品 TRL 在 48 款中的位置计分，TRL 6、7、8、9 分别为 0、33.33、66.67、100。",
+]
+weights_table = pd.DataFrame({
+    "政策权重": policy_weights*100,
+    "CRITIC权重": critic_weights*100,
+    "组合权重": weights*100,
+    "计算方式": methods,
+}, index=axes.columns)
+weights_table.index.name = "维度"
+policy_scores = unit @ policy_weights
+policy_order = order(policy_scores)[0] if order(policy_scores).ndim > 1 else order(policy_scores)
+policy_top = set(names[policy_order[:15]])
+weight_compare = pd.DataFrame({
+    "方案": ["政策偏好权重", "CRITIC客观权重", "等比例组合权重"],
+    "性能%": [policy_weights[0]*100, critic_weights[0]*100, weights[0]*100],
+    "经济%": [policy_weights[1]*100, critic_weights[1]*100, weights[1]*100],
+    "适配%": [policy_weights[2]*100, critic_weights[2]*100, weights[2]*100],
+    "安全%": [policy_weights[3]*100, critic_weights[3]*100, weights[3]*100],
+    "成熟度%": [policy_weights[4]*100, critic_weights[4]*100, weights[4]*100],
+}).set_index("方案")
+second = short.index[1]
 html = f"""<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>问题二｜候选产品综合评价与选型短名单</title><style>
 *{{box-sizing:border-box}}body{{max-width:1180px;margin:auto;padding:36px 28px 70px;color:#193840;font:16px/1.75 system-ui,sans-serif}}
@@ -163,14 +192,16 @@ td,th{{padding:5px 10px;border-bottom:1px solid #dee6e5;white-space:nowrap;text-
 <p>基准首选为 <b>{first}（{short.iloc[0]['型号']}）</b>，综合得分 {short.iloc[0]['总分']:.2f}，通过 {short.iloc[0]['通过站数']} 个站点的可核验门槛。前 15 名中共有 {short['通过站数'].gt(0).sum()} 款有可匹配站点，合计可选站点 {short_pass.sum()}/36。单站有机型可选表示有进一步核算台数与成本的价值。</p>
 <h2>综合排序前 15 名</h2><p>总分满分 100。入围频率和最好、最差名次均来自下文的 10,000 组联合扰动。通过站数为零的型号保留其综合排名，在本批站点只能列作储备。</p>
 {table(short[report_cols])}
-<p>首位两款的适配、安全和成熟度分数均相同。R013 的性能略高，R019 的经济分略高，两者总分差仅 {short.iloc[0]['总分']-short.iloc[1]['总分']:.3f} 分。应急救援则由短名单中的 R045、R044 提供选择，两者均为有防爆认证的履带机型。</p>
+<p>前两名为 {first} 和 {second}，组合权重下总分相差 {short.iloc[0]['总分']-short.iloc[1]['总分']:.3f} 分。应急救援由短名单中的 R045、R044 提供选择，两者均为有防爆认证的履带机型。</p>
 <h2>指标和权重</h2><div class="method">{table(weights_table)}</div>
-<p>采用加权加法模型，总分＝0.30 × 性能＋0.20 × 经济＋0.25 × 适配＋0.15 × 安全＋0.10 × 成熟度。性能、经济中的连续指标用全体 48 款的极差正向化：效益指标为 100(x−min)/(max−min)，成本指标为 100(max−x)/(max−min)。各维度均为 0–100 分。性能和适配合计 55%，体现城市多场景示范对技术能力与部署范围的重视；权重为本次分析假设，未使用专家打分。使用未展示的小数排序，相同时按编号升序。</p>
+<p>先将五个一级维度都转换到 0—100 分。连续指标采用极差正向化：效益指标为 100(x−min)/(max−min)，成本指标为 100(max−x)/(max−min)。政策偏好权重为（30%、20%、25%、15%、10%），体现性能与多场景适配优先。客观部分采用 CRITIC 法：令第 j 个维度的信息量 Cⱼ＝σⱼΣₖ(1−rⱼₖ)，其中 σⱼ 表示区分度，1−rⱼₖ 表示与其他维度的冲突性，再归一化得到客观权重。最终组合权重取政策权重和 CRITIC 权重各 50%，总分为五个维度分数的加权和。</p>
+{table(weight_compare)}
+<p>组合方案在保留政策目标的同时，让样本中区分度高、与其他维度重复较少的指标获得更大权重。相较仅用政策权重，组合权重的前 15 名保留 {len(policy_top & base_set)} 款；进入名单的是 {ids(sorted(base_set-policy_top))}，退出名单的是 {ids(sorted(policy_top-base_set))}。排序使用未展示的小数，同分时按产品编号升序。</p>
 <p>产品对本站的机型类别、负载、自由度、续航、定位误差、泛化、适配分阈值、IP、明确的防爆及 TRL 门槛全部满足，才计为通过。适配矩阵的 −1 直接排除。矩阵连续分仅用于达标判断，以减少与其他维度的重复计分。七类场景等权，使任务量较少的高危场景也有独立权重。安全分仅描述库内有据可查的防护与防爆能力；功能安全等级、证书有效性和 R4 站点是否涉及可燃气体仍需部署前核验。</p>
 <h2>短名单能服务哪些场景</h2>{table(coverage)}
 <p>全库中有 {eligible.any().sum()} 款至少通过一个站点。前 15 的零匹配型号为 {ids(short.index[short['通过站数'].eq(0)])}。全库也无合格产品的站点为 {ids(s.index[~all_pass])}。使用短名单后额外失去可选产品的站点为 {ids(s.index[all_pass & ~short_pass])}。</p>
 <p>有部署可能、但位于前 15 之外的型号为 {ids(excluded.index)}。后续计算采购方案时可将这些产品一并纳入比价；其逐站匹配关系见全量评分表和 CSV。</p>
-<h2>权重灵敏性</h2><p>单独将一个一级权重乘以 0.8 或 1.2，其余先保持基准值，再将全部权重归一化到和为 1。例如，性能上调时实际权重为 0.36/1.06＝33.96%。组内权重、站点门槛与原始数据固定。</p>
+<h2>权重灵敏性</h2><p>以下以组合权重为基准，单独将一个一级权重乘以 0.8 或 1.2，其余保持不变，再将五项归一化到和为 1。组内权重、站点门槛与原始数据固定。</p>
 {table(single.set_index(['维度','相对扰动']))}
 <p>联合扰动将五个权重分别乘以独立均匀分布 U(0.8,1.2) 的系数，按同一方式归一化。共 10,000 次，随机种子 20261127。成为第一名的型号及频率为 {winners}。与基准前 15 相比，保留数为 {retained.min()}–{retained.max()} 款，平均 {retained.mean():.2f} 款。另行遍历五个系数各取 0.8 或 1.2 的 32 个端点组合，保留数为 {min(corner_keep)}–{max(corner_keep)} 款。入围频率表示在这组权重假设下的结果，不代表实际采购概率。</p>
 <p>在随机扰动中始终入围的型号共 {result['入围频率%'].eq(100).sum()} 款。32 个端点中有 {len(changes)} 个使名单发生变动，具体组合如下。上调和下调均为归一化前的相对变化 20%。</p>

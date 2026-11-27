@@ -7,7 +7,7 @@ td,th{padding:5px 9px;border-bottom:1px solid #d6e2e1;text-align:right}thead{bac
 summary{cursor:pointer;font-weight:650}small{color:#52656c}code{font-size:15px}.note{border-left:4px solid #a05f28;padding:4px 16px;background:#fcf6ed}
 </style><main><h1>问题三｜机器人采购与站点分配</h1>
 <p><b>推荐最高覆盖方案。</b>在优先保障可服务的高危任务、让每个有合格机型的站点都完成日常任务的偏好下，购置 41 台、部署 34 站，日均服务 2,417 单。首年财政支出 3,252.29 万元，低于 2027 年 4,000 万元额度；六年成本现值为 4,016.08 万元。</p>
-<p class="note">严格执行七类场景全部达到 85% 时，原题数据无可行解。政务接待站 S030 的 28 单/日无机型满足要求，其余三站合计 115 单/日，最多覆盖 115/143＝80.42%。达到 85% 需要 121.55 单/日，差 6.55 单/日。下列方案均以明确记录这项例外为前提；若 85% 是不可豁免的验收线，则三套方案均不能通过验收。</p>
+<p class="note">附件将 85% 标为软约束。本文先计算每类场景的物理可达率 ρₖmax，再把有效考核线统一定义为 min(85%, ρₖmax)。政务接待因 S030 无合格机型，ρₖmax＝115/143＝80.42%，故有效考核线为 80.42%；其余场景仍执行 85%。如果项目方把七类场景的 85% 全部改为不可放宽的硬验收线，则原始候选库无可行解。</p>
 <h2>三套采购方案</h2><div class="scroll"><table class="dataframe">
   <thead>
     <tr style="text-align: right;">
@@ -17,6 +17,8 @@ summary{cursor:pointer;font-weight:650}small{color:#52656c}code{font-size:15px}.
       <th>充电桩</th>
       <th>任务覆盖</th>
       <th>覆盖率%</th>
+      <th>物理上界完成率%</th>
+      <th>场景可达完成率标准差pp</th>
       <th>可替代人力当量</th>
       <th>高危覆盖率%</th>
       <th>首年支出</th>
@@ -24,6 +26,8 @@ summary{cursor:pointer;font-weight:650}small{color:#52656c}code{font-size:15px}.
     </tr>
     <tr>
       <th>方案</th>
+      <th></th>
+      <th></th>
       <th></th>
       <th></th>
       <th></th>
@@ -43,6 +47,8 @@ summary{cursor:pointer;font-weight:650}small{color:#52656c}code{font-size:15px}.
       <td>32</td>
       <td>2,221.40</td>
       <td>90.04</td>
+      <td>91.91</td>
+      <td>5.30</td>
       <td>216.71</td>
       <td>87.64</td>
       <td>2,797.34</td>
@@ -55,6 +61,8 @@ summary{cursor:pointer;font-weight:650}small{color:#52656c}code{font-size:15px}.
       <td>33</td>
       <td>2,343.80</td>
       <td>95.01</td>
+      <td>96.97</td>
+      <td>4.52</td>
       <td>222.83</td>
       <td>87.64</td>
       <td>3,000.16</td>
@@ -67,6 +75,8 @@ summary{cursor:pointer;font-weight:650}small{color:#52656c}code{font-size:15px}.
       <td>34</td>
       <td>2,417.00</td>
       <td>97.97</td>
+      <td>100.00</td>
+      <td>0.00</td>
       <td>232.00</td>
       <td>87.64</td>
       <td>3,252.29</td>
@@ -74,7 +84,7 @@ summary{cursor:pointer;font-weight:650}small{color:#52656c}code{font-size:15px}.
     </tr>
   </tbody>
 </table></div>
-<p>三个方案分别要求全市覆盖至少 90%、95%、或达到可行上界。共同要求其他六类场景达到 85%、政务达到自身上界、R4/R5 尽可能全部覆盖。在各自要求下最小化六年成本。人力按本站已覆盖任务比例线性折算为全职当量，用于比较方案。高危站总计 178 单/日，可服务其中 156 单/日。</p>
+<p>三个方案分别要求全市覆盖至少 90%、95%、或达到物理可行上界。各场景均执行统一的可达覆盖率约束 qₖ/dₖ≥min(85%,ρₖmax)，并把 R4/R5 覆盖量固定在其可达上界；在相应服务水平下最小化六年成本。物理上界完成率表示实际覆盖量占全部可达任务量的比例；场景可达完成率标准差以各场景“实际覆盖/物理上界”为样本计算，越小表示场景间越均衡。人力按本站覆盖比例折算为全职当量。高危站总计 178 单/日，可服务其中 156 单/日。</p>
 <p>最高覆盖方案比均衡覆盖方案多 4 台，首年多支出 252.13 万元，六年成本现值增加 315.21 万元，日均多覆盖 73.2 单。均衡方案尚未部署的可服务站点为 S026。设备型号限于第二问已核验可用的候选，选型时保留前 15 名以外的合格机型比价。</p>
 <h2>买哪些型号，放在哪些站点</h2><div class="scroll"><table class="dataframe">
   <thead>
@@ -146,18 +156,22 @@ summary{cursor:pointer;font-weight:650}small{color:#52656c}code{font-size:15px}.
     </tr>
   </tbody>
 </table></div>
-<p>各场景覆盖率按站点实际完成单量汇总，单位为 %。最右列单位为单/日，表示在本候选库下距 85% 的不可消除缺口。</p><div class="scroll"><table class="dataframe">
+<p>各场景覆盖率按站点实际完成单量汇总。物理上界由本站台数上限、合格机型和班次共同决定；有效考核线取 85% 与物理上界的较小者。最后一列单位为单/日，表示在当前候选库下距 85% 的结构性不可达缺口。</p><div class="scroll"><table class="dataframe">
   <thead>
     <tr style="text-align: right;">
       <th>方案</th>
       <th>总任务量</th>
+      <th>物理上界%</th>
+      <th>有效考核线%</th>
       <th>成本优先</th>
       <th>均衡覆盖</th>
       <th>最高覆盖</th>
-      <th>距85%最低缺口</th>
+      <th>距85%不可达缺口</th>
     </tr>
     <tr>
       <th>场景</th>
+      <th></th>
+      <th></th>
       <th></th>
       <th></th>
       <th></th>
@@ -170,6 +184,8 @@ summary{cursor:pointer;font-weight:650}small{color:#52656c}code{font-size:15px}.
       <th>工业巡检</th>
       <td>259.00</td>
       <td>91.51</td>
+      <td>85.00</td>
+      <td>91.51</td>
       <td>91.51</td>
       <td>91.51</td>
       <td>0.00</td>
@@ -177,6 +193,8 @@ summary{cursor:pointer;font-weight:650}small{color:#52656c}code{font-size:15px}.
     <tr>
       <th>酒店商超服务</th>
       <td>1,066.00</td>
+      <td>100.00</td>
+      <td>85.00</td>
       <td>88.18</td>
       <td>97.99</td>
       <td>100.00</td>
@@ -185,6 +203,8 @@ summary{cursor:pointer;font-weight:650}small{color:#52656c}code{font-size:15px}.
     <tr>
       <th>养老陪护</th>
       <td>423.00</td>
+      <td>100.00</td>
+      <td>85.00</td>
       <td>96.03</td>
       <td>96.03</td>
       <td>100.00</td>
@@ -193,6 +213,8 @@ summary{cursor:pointer;font-weight:650}small{color:#52656c}code{font-size:15px}.
     <tr>
       <th>医疗辅助</th>
       <td>264.00</td>
+      <td>100.00</td>
+      <td>85.00</td>
       <td>86.74</td>
       <td>86.74</td>
       <td>100.00</td>
@@ -204,11 +226,15 @@ summary{cursor:pointer;font-weight:650}small{color:#52656c}code{font-size:15px}.
       <td>80.42</td>
       <td>80.42</td>
       <td>80.42</td>
+      <td>80.42</td>
+      <td>80.42</td>
       <td>6.55</td>
     </tr>
     <tr>
       <th>应急救援</th>
       <td>76.00</td>
+      <td>100.00</td>
+      <td>85.00</td>
       <td>100.00</td>
       <td>100.00</td>
       <td>100.00</td>
@@ -217,6 +243,8 @@ summary{cursor:pointer;font-weight:650}small{color:#52656c}code{font-size:15px}.
     <tr>
       <th>科普教育</th>
       <td>236.00</td>
+      <td>100.00</td>
+      <td>85.00</td>
       <td>92.46</td>
       <td>100.00</td>
       <td>100.00</td>
@@ -840,7 +868,7 @@ summary{cursor:pointer;font-weight:650}small{color:#52656c}code{font-size:15px}.
 <p>六年成本现值＝初始设备净支出＋配套费＋六年运维和电费现值−残值现值。运维以购入首年为起点每年上涨 3%，质保内市方承担 50%；按全年 365 日、双班 2.2 kWh/台·日、单班减半、电价 0.75 元/kWh 计电费，金额除以 10,000 换算万元。折现率 5%，经常支出按年末发生，残值取第六年末设备补贴前原价的 10%。</p>
 <h2>整数模型与求解</h2>
 <p>令 xᵢⱼ 为站点 i 采购产品 j 的非负整数台数，nᵢ＝Σⱼxᵢⱼ。仅允许通过机型、五项性能门槛、适配分阈值、IP、防爆及 TRL 核验的组合取正值；nᵢ ≤ 本站台数上限。附件未给出逐型号功能安全证书及所有 R4 站点的可燃气体标记，按已知字段筛选，并对化工装置区保守要求防爆；落地时仍须核实适用认证。服务时段仅给时间窗，24 小时站按双班，其他按服务窗口 ≤12 小时为单班、&gt;12 小时为双班处理，跨午夜按实际时长。这一分界为本次假设。</p>
-<p>站点有效完成量 qᵢ＝min(站点需求 dᵢ, 0.92 × 班次系数 × Σⱼ标称日产能ⱼ × xᵢⱼ)，单班系数 0.5、双班系数 1。双班标称日产能已包含两班；完成量按需求封顶，富余不能跨站抵扣。各场景覆盖率＝Σqᵢ/Σdᵢ，缺口保留真实需求作分母。站点上界来自遍历全部合格组合。用 ε 约束法设置全市覆盖下限与场景均衡要求，将 R4/R5 的覆盖量固定在可达上界后，求各覆盖档的最低成本。</p>
+<p>站点有效完成量 qᵢ＝min(站点需求 dᵢ, 0.92 × 班次系数 × Σⱼ标称日产能ⱼxᵢⱼ)，单班系数 0.5、双班系数 1。双班标称日产能已包含两班；完成量按需求封顶，富余不能跨站抵扣。先遍历本站全部合格整数组合得到站点上界 qᵢmax，再计算场景物理可达率 ρₖmax＝Σᵢ∈kqᵢmax/Σᵢ∈kdᵢ，并施加 Σᵢ∈kqᵢ/Σᵢ∈kdᵢ≥min(85%,ρₖmax)。随后用 ε 约束法设置全市覆盖档，将 R4/R5 覆盖量固定在可达上界，分别求最低生命周期成本。</p>
 <p>按站枚举 0 到台数上限的整数多重组合，允许同站混配型号；在本站预算、成本及覆盖上均无优势的组合可剪枝。一个染色体含 36 个基因，每个基因选择本站的一种配置。每个覆盖档分别运行遗传算法：种群 120、240 代、4 元锦标赛、均匀交叉、每基因变异率 1.4/36、保留 8 个精英。再以可行解成本为上界，把每站选一项写成 0-1 混合整数规划，用 HiGHS 分支定界精修并校验。下表的最优性仅对应本页列明的假设和各档约束。</p><div class="scroll"><table class="dataframe">
   <thead>
     <tr style="text-align: right;">
@@ -868,10 +896,10 @@ summary{cursor:pointer;font-weight:650}small{color:#52656c}code{font-size:15px}.
     </tr>
     <tr>
       <th>均衡覆盖</th>
-      <td>3,706.06</td>
+      <td>3,700.87</td>
       <td>3,700.87</td>
       <td>0.00</td>
-      <td>5.19</td>
+      <td>-0.00</td>
     </tr>
     <tr>
       <th>最高覆盖</th>

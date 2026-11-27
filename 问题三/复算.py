@@ -109,7 +109,10 @@ options = options.loc[keep].reset_index(drop=True)
 groups = [g.index.to_numpy() for _,g in options.groupby("站序",sort=True)]
 stations = np.arange(len(s))
 capacity = options.groupby("站序")["覆盖"].max().to_numpy()
-required = np.minimum(target*scene_demand,by_scene@capacity)
+scene_capacity = by_scene@capacity
+attainable_rate = scene_capacity/scene_demand
+effective_floor = np.minimum(target,attainable_rate)
+required = effective_floor*scene_demand
 risk_ceiling = capacity[risk_mask].sum()
 goals = {"成本优先":.90*demand.sum(),"均衡覆盖":.95*demand.sum(),"最高覆盖":capacity.sum()}
 # 每个备选组合对应的约束矩阵行，既用于群体搜索，也用于精确校验。
@@ -198,9 +201,13 @@ for k,(name,goal) in enumerate(goals.items()):
     g = options.iloc[plan].set_axis(s.index)
     served = g["覆盖"].to_numpy()
     fraction = served/demand
+    served_by_scene = by_scene@served
+    reachable_completion = served_by_scene/scene_capacity
     summary.append({"方案":name,"台数":g["台数"].sum(),"投放站数":g["台数"].gt(0).sum(),"充电桩":g["桩数"].sum(),
         "任务覆盖":served.sum(),"覆盖率%":served.sum()/demand.sum()*100,"可替代人力当量":fraction@s["人力"],
         "高危覆盖率%":served[risk_mask].sum()/demand[risk_mask].sum()*100,
+        "物理上界完成率%":served.sum()/capacity.sum()*100,
+        "场景可达完成率标准差pp":reachable_completion.std()*100,
         **{c:g[c].sum() for c in ["设备原价","设备净支出","配套","首年运维","年电费","首年支出","次年支出","第三年支出","三年支出","寿命成本"]},
         "遗传算法寿命成本":lcc[ga].sum(),"精确求解间隙%":100*gap})
     counts = Counter(pid for combo in g["组合"] for pid in combo)
@@ -235,12 +242,15 @@ station_table = details[details["方案"]=="最高覆盖"].set_index("站点编�
 zero = station_table.loc[station_table["覆盖"]==0,["场景","名称","需求","产品及数量"]]
 scene_table = coverage.pivot(index="场景",columns="方案",values="覆盖率%").reindex(index=scenes,columns=summary.index)
 scene_table.insert(0,"总任务量",scene_demand)
-scene_table["距85%最低缺口"] = np.maximum(0,target*scene_demand-by_scene@capacity)
+scene_table.insert(1,"物理上界%",100*attainable_rate)
+scene_table.insert(2,"有效考核线%",100*effective_floor)
+scene_table["距85%不可达缺口"] = np.maximum(0,target*scene_demand-scene_capacity)
 mix_table = mix.pivot_table(index=["产品编号","型号","机型"],columns="方案",values="台数",fill_value=0).reindex(columns=summary.index)
 cash = summary[["设备原价","设备净支出","配套","首年运维","年电费","首年支出","次年支出","第三年支出","三年支出","寿命成本"]].T
 alg = summary[["遗传算法寿命成本","寿命成本","精确求解间隙%"]].copy()
 alg["精修节省"] = alg["遗传算法寿命成本"]-alg["寿命成本"]
-headline = ["台数","投放站数","充电桩","任务覆盖","覆盖率%","可替代人力当量","高危覆盖率%","首年支出","寿命成本"]
+headline = ["台数","投放站数","充电桩","任务覆盖","覆盖率%","物理上界完成率%",
+            "场景可达完成率标准差pp","可替代人力当量","高危覆盖率%","首年支出","寿命成本"]
 html = f"""<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>问题三｜采购与站点分配</title><style>
 *{{box-sizing:border-box}}body{{max-width:1180px;margin:auto;padding:38px 28px 64px;font:16px/1.75 system-ui,sans-serif;color:#1e393e}}
@@ -250,12 +260,12 @@ td,th{{padding:5px 9px;border-bottom:1px solid #d6e2e1;text-align:right}}thead{{
 summary{{cursor:pointer;font-weight:650}}small{{color:#52656c}}code{{font-size:15px}}.note{{border-left:4px solid #a05f28;padding:4px 16px;background:#fcf6ed}}
 </style><main><h1>问题三｜机器人采购与站点分配</h1>
 <p><b>推荐最高覆盖方案。</b>在优先保障可服务的高危任务、让每个有合格机型的站点都完成日常任务的偏好下，购置 {int(rec['台数'])} 台、部署 {int(rec['投放站数'])} 站，日均服务 {rec['任务覆盖']:,.0f} 单。首年财政支出 {rec['首年支出']:,.2f} 万元，低于 2027 年 4,000 万元额度；六年成本现值为 {rec['寿命成本']:,.2f} 万元。</p>
-<p class="note">严格执行七类场景全部达到 85% 时，原题数据无可行解。政务接待站 S030 的 28 单/日无机型满足要求，其余三站合计 115 单/日，最多覆盖 115/143＝80.42%。达到 85% 需要 121.55 单/日，差 6.55 单/日。下列方案均以明确记录这项例外为前提；若 85% 是不可豁免的验收线，则三套方案均不能通过验收。</p>
+<p class="note">附件将 85% 标为软约束。本文先计算每类场景的物理可达率 ρₖmax，再把有效考核线统一定义为 min(85%, ρₖmax)。政务接待因 S030 无合格机型，ρₖmax＝115/143＝80.42%，故有效考核线为 80.42%；其余场景仍执行 85%。如果项目方把七类场景的 85% 全部改为不可放宽的硬验收线，则原始候选库无可行解。</p>
 <h2>三套采购方案</h2>{table(summary[headline])}
-<p>三个方案分别要求全市覆盖至少 90%、95%、或达到可行上界。共同要求其他六类场景达到 85%、政务达到自身上界、R4/R5 尽可能全部覆盖。在各自要求下最小化六年成本。人力按本站已覆盖任务比例线性折算为全职当量，用于比较方案。高危站总计 {demand[risk_mask].sum()} 单/日，可服务其中 {risk_ceiling:.0f} 单/日。</p>
+<p>三个方案分别要求全市覆盖至少 90%、95%、或达到物理可行上界。各场景均执行统一的可达覆盖率约束 qₖ/dₖ≥min(85%,ρₖmax)，并把 R4/R5 覆盖量固定在其可达上界；在相应服务水平下最小化六年成本。物理上界完成率表示实际覆盖量占全部可达任务量的比例；场景可达完成率标准差以各场景“实际覆盖/物理上界”为样本计算，越小表示场景间越均衡。人力按本站覆盖比例折算为全职当量。高危站总计 {demand[risk_mask].sum()} 单/日，可服务其中 {risk_ceiling:.0f} 单/日。</p>
 <p>最高覆盖方案比均衡覆盖方案多 {int(rec['台数']-middle['台数'])} 台，首年多支出 {rec['首年支出']-middle['首年支出']:.2f} 万元，六年成本现值增加 {rec['寿命成本']-middle['寿命成本']:.2f} 万元，日均多覆盖 {rec['任务覆盖']-middle['任务覆盖']:.1f} 单。均衡方案尚未部署的可服务站点为 {'、'.join(details.loc[(details['方案']=='均衡覆盖') & (details['台数']==0) & details['站点编号'].isin(s.index[capacity>0]),'站点编号'])}。设备型号限于第二问已核验可用的候选，选型时保留前 15 名以外的合格机型比价。</p>
 <h2>买哪些型号，放在哪些站点</h2>{table(mix_table.astype(int))}
-<p>各场景覆盖率按站点实际完成单量汇总，单位为 %。最右列单位为单/日，表示在本候选库下距 85% 的不可消除缺口。</p>{table(scene_table)}
+<p>各场景覆盖率按站点实际完成单量汇总。物理上界由本站台数上限、合格机型和班次共同决定；有效考核线取 85% 与物理上界的较小者。最后一列单位为单/日，表示在当前候选库下距 85% 的结构性不可达缺口。</p>{table(scene_table)}
 <details open><summary>推荐方案 · 全部 36 个站点</summary>{table(station_table[['场景','名称','风险','班数','需求','产品及数量','台数','桩数','覆盖','缺口','首年支出']])}</details>
 <p>上表保留了无机型可投的站点。S008 要求定位误差 ≤1.00 mm，可接受类别的最佳值为 1.13 mm；S030 仅接受双足人形，要求续航 ≥6 h、误差 ≤0.60 mm，而该类最长续航 4.8 h、最佳误差 1.13 mm。因此两站的 50 单/日构成全市供给缺口。另两套方案的逐站数据也已收入 CSV。</p>
 <h2>资金与寿命成本（万元）</h2>{table(cash)}
@@ -264,7 +274,7 @@ summary{{cursor:pointer;font-weight:650}}small{{color:#52656c}}code{{font-size:1
 <p>六年成本现值＝初始设备净支出＋配套费＋六年运维和电费现值−残值现值。运维以购入首年为起点每年上涨 3%，质保内市方承担 50%；按全年 365 日、双班 2.2 kWh/台·日、单班减半、电价 0.75 元/kWh 计电费，金额除以 10,000 换算万元。折现率 5%，经常支出按年末发生，残值取第六年末设备补贴前原价的 10%。</p>
 <h2>整数模型与求解</h2>
 <p>令 xᵢⱼ 为站点 i 采购产品 j 的非负整数台数，nᵢ＝Σⱼxᵢⱼ。仅允许通过机型、五项性能门槛、适配分阈值、IP、防爆及 TRL 核验的组合取正值；nᵢ ≤ 本站台数上限。附件未给出逐型号功能安全证书及所有 R4 站点的可燃气体标记，按已知字段筛选，并对化工装置区保守要求防爆；落地时仍须核实适用认证。服务时段仅给时间窗，24 小时站按双班，其他按服务窗口 ≤12 小时为单班、&gt;12 小时为双班处理，跨午夜按实际时长。这一分界为本次假设。</p>
-<p>站点有效完成量 qᵢ＝min(站点需求 dᵢ, 0.92 × 班次系数 × Σⱼ标称日产能ⱼ × xᵢⱼ)，单班系数 0.5、双班系数 1。双班标称日产能已包含两班；完成量按需求封顶，富余不能跨站抵扣。各场景覆盖率＝Σqᵢ/Σdᵢ，缺口保留真实需求作分母。站点上界来自遍历全部合格组合。用 ε 约束法设置全市覆盖下限与场景均衡要求，将 R4/R5 的覆盖量固定在可达上界后，求各覆盖档的最低成本。</p>
+<p>站点有效完成量 qᵢ＝min(站点需求 dᵢ, 0.92 × 班次系数 × Σⱼ标称日产能ⱼxᵢⱼ)，单班系数 0.5、双班系数 1。双班标称日产能已包含两班；完成量按需求封顶，富余不能跨站抵扣。先遍历本站全部合格整数组合得到站点上界 qᵢmax，再计算场景物理可达率 ρₖmax＝Σᵢ∈kqᵢmax/Σᵢ∈kdᵢ，并施加 Σᵢ∈kqᵢ/Σᵢ∈kdᵢ≥min(85%,ρₖmax)。随后用 ε 约束法设置全市覆盖档，将 R4/R5 覆盖量固定在可达上界，分别求最低生命周期成本。</p>
 <p>按站枚举 0 到台数上限的整数多重组合，允许同站混配型号；在本站预算、成本及覆盖上均无优势的组合可剪枝。一个染色体含 36 个基因，每个基因选择本站的一种配置。每个覆盖档分别运行遗传算法：种群 120、240 代、4 元锦标赛、均匀交叉、每基因变异率 1.4/36、保留 8 个精英。再以可行解成本为上界，把每站选一项写成 0-1 混合整数规划，用 HiGHS 分支定界精修并校验。下表的最优性仅对应本页列明的假设和各档约束。</p>{table(alg)}
 <p><small>来源为赛题 Excel 附件 1 至 4。此页和配套程序为 AI 辅助复算材料。工具为 OpenAI Codex（GPT-6 系列，使用日期 2026-11-27，具体版本发布日期未提供）。</small></p></main></html>"""
 (OUT/"问题三分析.html").write_text(html,encoding="utf-8")
